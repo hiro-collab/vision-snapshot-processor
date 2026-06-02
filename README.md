@@ -20,7 +20,24 @@ Dify 向け snapshot 集約も担当しません。
 
 将来は同じ runtime に、在室、窓・カーテン状態、特定物体状態などの snapshot processor を追加できます。
 
-## Start
+## 初期セットアップ
+
+```powershell
+uv sync
+uv run python -m unittest discover -s tests
+```
+
+通常運用では、先に USB camera を FFmpeg / MediaMTX / Camera Hub 側で配信しておきます。この organ は
+RTSP stream を低頻度で読み、snapshot state topic を出すだけです。
+
+## dotenv / local config
+
+標準の `.env` は不要です。接続先は起動引数で渡します。RTSP URL、frame id、processor 名を
+環境に合わせて指定してください。
+
+snapshot、debug frame、`.cache/`、`.venv/` はローカル資材です。Git に含めません。
+
+## 通常起動
 
 ```powershell
 cd <workspace>\vision-snapshot-processor
