@@ -6,7 +6,8 @@ import os
 import signal
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 import cv2
 
@@ -69,6 +70,21 @@ def parse_camera_source(value: str) -> str:
     return parsed
 
 
+def normalize_camera_source_for_capture(value: str) -> str:
+    parts = urlsplit(value)
+    if parts.scheme.lower() != "file":
+        return value
+
+    if parts.netloc and parts.netloc.lower() != "localhost":
+        url_path = f"//{parts.netloc}{parts.path}"
+    else:
+        url_path = parts.path
+    path = url2pathname(unquote(url_path))
+    if len(path) >= 3 and path[0] in {"/", "\\"} and path[2] == ":":
+        path = path[1:]
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run snapshot-based vision processors and publish topic envelopes.",
@@ -96,7 +112,8 @@ async def run(args: argparse.Namespace) -> None:
     if args.opencv_ffmpeg_capture_options.strip().lower() != "none":
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = args.opencv_ffmpeg_capture_options
 
-    capture = cv2.VideoCapture(args.camera_source, cv2.CAP_FFMPEG)
+    capture_source = normalize_camera_source_for_capture(args.camera_source)
+    capture = cv2.VideoCapture(capture_source, cv2.CAP_FFMPEG)
     try:
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if args.camera_width is not None:
