@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 
 from vision_snapshot_processor.processors.room_light import RoomLightSnapshotProcessor
+from vision_snapshot_processor.processors import room_light
 from vision_snapshot_processor.topics import (
     MSG_TYPE_ROOM_LIGHT_STATE,
     ROOM_LIGHT_STATE_TOPIC,
@@ -62,6 +63,39 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         self.assertEqual(envelope["msg_type"], "vision_snapshot_processor/RoomLightState")
         self.assertEqual(envelope["header"]["frame_id"], "cam0")
         self.assertEqual(envelope["payload"]["type"], "room_light_state")
+
+    def test_daylight_switch_calibration_distinguishes_electric_light(self) -> None:
+        on_state = room_light._daylight_electric_switch_state(
+            {
+                "luma_mean": 0.56,
+                "dynamic_range": 0.74,
+                "overexposed_fraction": 0.09,
+                "underexposed_fraction": 0.002,
+                "edge_density": 0.50,
+            },
+            electric_probability=0.62,
+            daylight_probability=0.78,
+            dark_probability=0.05,
+        )
+        off_state = room_light._daylight_electric_switch_state(
+            {
+                "luma_mean": 0.48,
+                "dynamic_range": 0.60,
+                "overexposed_fraction": 0.02,
+                "underexposed_fraction": 0.04,
+                "edge_density": 0.45,
+            },
+            electric_probability=0.59,
+            daylight_probability=0.66,
+            dark_probability=0.12,
+        )
+
+        self.assertIsNotNone(on_state)
+        self.assertIsNotNone(off_state)
+        assert on_state is not None
+        assert off_state is not None
+        self.assertEqual(on_state[0], "on")
+        self.assertEqual(off_state[0], "off")
 
 
 if __name__ == "__main__":

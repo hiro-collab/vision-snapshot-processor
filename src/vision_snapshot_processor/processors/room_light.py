@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 
-ROOM_LIGHT_MODEL_NAME = "room-light-heuristic-snapshot-v1"
+ROOM_LIGHT_MODEL_NAME = "room-light-heuristic-snapshot-v2"
 
 
 @dataclass(frozen=True)
@@ -250,9 +250,17 @@ def _classify(frames: list[FrameFeatures]) -> RoomLightState:
     )
 
     lighting_type = _lighting_type(electric_probability, daylight_probability, dark_probability)
+    daylight_switch_state = _daylight_electric_switch_state(
+        summary,
+        electric_probability=electric_probability,
+        daylight_probability=daylight_probability,
+        dark_probability=dark_probability,
+    )
     state = "unknown"
     confidence = 0.0
-    if electric_probability >= 0.68 and dark_probability < 0.65:
+    if daylight_switch_state is not None:
+        state, confidence = daylight_switch_state
+    elif electric_probability >= 0.68 and dark_probability < 0.65:
         state = "on"
         confidence = min(1.0, electric_probability)
     elif electric_probability <= 0.28 and dark_probability >= 0.58 and daylight_probability <= 0.42:
@@ -288,6 +296,39 @@ def _lighting_type(electric: float, daylight: float, dark: float) -> str:
     if daylight >= 0.68:
         return "daylight"
     return "unknown"
+
+
+def _daylight_electric_switch_state(
+    summary: dict[str, float],
+    *,
+    electric_probability: float,
+    daylight_probability: float,
+    dark_probability: float,
+) -> tuple[str, float] | None:
+    if daylight_probability < 0.55 or dark_probability >= 0.30:
+        return None
+
+    bright_electric_signature = (
+        summary["luma_mean"] >= 0.535
+        and summary["dynamic_range"] >= 0.70
+        and summary["overexposed_fraction"] >= 0.06
+        and summary["underexposed_fraction"] <= 0.01
+        and summary["edge_density"] >= 0.47
+    )
+    daylight_without_electric_signature = (
+        summary["luma_mean"] <= 0.54
+        and summary["dynamic_range"] <= 0.69
+        and summary["overexposed_fraction"] <= 0.055
+        and summary["underexposed_fraction"] >= 0.018
+    )
+
+    if bright_electric_signature:
+        confidence = 0.68 + min(0.18, max(0.0, electric_probability - 0.58))
+        return ("on", _clamp_float(confidence, 0.0, 1.0))
+    if daylight_without_electric_signature:
+        confidence = 0.62 + min(0.16, max(0.0, daylight_probability - 0.55))
+        return ("off", _clamp_float(confidence, 0.0, 1.0))
+    return None
 
 
 def _ternary_state(probability: float, *, high: float, low: float) -> str:
