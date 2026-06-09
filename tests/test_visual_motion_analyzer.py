@@ -155,6 +155,83 @@ class VisualMotionAnalyzerTest(unittest.TestCase):
         self.assertTrue(source_ref["source_ref_id"].startswith("redacted_source_"))
         self.assertNotIn("/", source_ref["source_ref_id"])
 
+    def test_browser_frame_provider_source_kind_is_preserved(self) -> None:
+        frames = [_frame() for _ in range(4)]
+
+        summary, _rows = analyze_frames(
+            frames,
+            analysis_run_id="vismot_run_test_browser_kind_001",
+            scenario_id="rr003.visible_motion.browser.self_mirror.v0",
+            motion_event_id="mot_evt_test_browser_kind_001",
+            stimulus_instance_id="mot_inst_test_browser_kind_001",
+            driver_result_id="mot_drv_test_browser_kind_001",
+            sample_rate_fps=10,
+            windows=WINDOWS,
+            rois=ROIS,
+            source_ref_id="redacted_browser_projection_visual_001",
+            source_ref_kind="browser_frame_provider",
+            proof_layer="visible_motion",
+        )
+
+        self.assertEqual(summary["source_ref"]["kind"], "browser_frame_provider")
+        self.assertEqual(summary["proof_layer"], "visible_motion")
+
+    def test_synthetic_self_mirror_fixture_does_not_need_frame_paths(self) -> None:
+        synthetic_rois = [
+            *ROIS,
+            {
+                "roi_id": "avatar_torso",
+                "kind": "avatar",
+                "counts_as_avatar_motion": True,
+                "expected_for_pass": False,
+                "rect_norm": {"x": 0.20, "y": 0.0, "w": 0.30, "h": 1.0},
+            },
+        ]
+        config = {
+            "analysis_run_id": "vismot_run_test_synthetic_self_mirror_001",
+            "scenario_id": "rr003.visible_motion.self_mirror.synthetic.v0",
+            "motion_event_id": "mot_evt_test_synthetic_self_mirror_001",
+            "stimulus_instance_id": "mot_inst_test_synthetic_self_mirror_001",
+            "driver_result_id": "mot_drv_test_synthetic_self_mirror_001",
+            "proof_layer": "no_live_runtime",
+            "source_ref": {
+                "kind": "synthetic_test_frames",
+                "source_ref_id": "redacted_synthetic_self_mirror_001",
+            },
+            "sampling": {"sample_rate_fps": 8},
+            "synthetic_fixture": {
+                "width": 320,
+                "height": 180,
+                "frame_count": 24,
+                "avatar_motion_roi_ids": ["avatar_face_head"],
+                "guard_motion_roi_ids": ["speech_bubble"],
+            },
+            "windows": [
+                {"window_id": "pretrigger", "start_ms": 0, "end_ms": 500},
+                {"window_id": "active", "start_ms": 500, "end_ms": 1800},
+                {"window_id": "release", "start_ms": 1800, "end_ms": 2400},
+                {"window_id": "settle", "start_ms": 2400, "end_ms": 3000},
+            ],
+            "rois": synthetic_rois,
+            "thresholds": {
+                "active_motion_min_score": 0.08,
+                "settle_motion_max_score": 0.05,
+                "min_consecutive_samples": 2,
+            },
+        }
+
+        from vision_snapshot_processor.visual_motion_analyzer import analyze_config
+
+        summary, rows = analyze_config(config)
+
+        self.assertEqual(summary["source_ref"]["kind"], "synthetic_test_frames")
+        self.assertEqual(summary["source_ref"]["source_ref_id"], "redacted_synthetic_self_mirror_001")
+        self.assertEqual(summary["result"], "visual-pass")
+        self.assertEqual(_roi(summary, "avatar_face_head")["pass_label"], "visual-motion-detected")
+        self.assertEqual(_roi(summary, "avatar_torso")["pass_label"], "avatar-motion-not-required")
+        self.assertEqual(_roi(summary, "speech_bubble")["pass_label"], "guard-ui-motion-excluded")
+        self.assertEqual(len(rows), (24 - 1) * len(synthetic_rois))
+
     def test_cli_json_uses_artifact_basenames_not_local_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
