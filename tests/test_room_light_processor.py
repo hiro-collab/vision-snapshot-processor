@@ -14,6 +14,41 @@ from vision_snapshot_processor.topics import (
 )
 
 
+def _feature_frame(
+    *,
+    frame_id: int,
+    stamp: float,
+    luma_mean: float,
+    luma_std: float,
+    dynamic_range: float,
+    saturation_mean: float,
+    warm_ratio: float,
+    blue_ratio: float,
+    lab_b_mean: float,
+    edge_density: float,
+    underexposed_fraction: float,
+    overexposed_fraction: float,
+) -> room_light.FrameFeatures:
+    return room_light.FrameFeatures(
+        frame_id=frame_id,
+        stamp=stamp,
+        luma_mean=luma_mean,
+        luma_std=luma_std,
+        luma_p10=0.0,
+        luma_p90=dynamic_range,
+        dynamic_range=dynamic_range,
+        saturation_mean=saturation_mean,
+        warm_ratio=warm_ratio,
+        blue_ratio=blue_ratio,
+        lab_b_mean=lab_b_mean,
+        edge_density=edge_density,
+        underexposed_fraction=underexposed_fraction,
+        overexposed_fraction=overexposed_fraction,
+        temporal_delta=0.0,
+        gray_small=np.zeros((2, 2), dtype=np.float32),
+    )
+
+
 class RoomLightSnapshotProcessorTest(unittest.TestCase):
     def test_requires_two_frames_before_state(self) -> None:
         processor = RoomLightSnapshotProcessor(min_frames=2, window_ms=1000)
@@ -96,6 +131,77 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         assert off_state is not None
         self.assertEqual(on_state[0], "on")
         self.assertEqual(off_state[0], "off")
+
+    def test_daylight_switch_calibration_updates_lighting_type(self) -> None:
+        on_state = room_light._classify(
+            [
+                _feature_frame(
+                    frame_id=1,
+                    stamp=1.0,
+                    luma_mean=0.55737,
+                    luma_std=0.27418,
+                    dynamic_range=0.75229,
+                    saturation_mean=0.1178,
+                    warm_ratio=1.01254,
+                    blue_ratio=1.16307,
+                    lab_b_mean=-0.00132,
+                    edge_density=0.53244,
+                    underexposed_fraction=0.00098,
+                    overexposed_fraction=0.09462,
+                ),
+                _feature_frame(
+                    frame_id=2,
+                    stamp=1.5,
+                    luma_mean=0.55737,
+                    luma_std=0.27418,
+                    dynamic_range=0.75229,
+                    saturation_mean=0.1178,
+                    warm_ratio=1.01254,
+                    blue_ratio=1.16307,
+                    lab_b_mean=-0.00132,
+                    edge_density=0.53244,
+                    underexposed_fraction=0.00098,
+                    overexposed_fraction=0.09462,
+                ),
+            ]
+        )
+        off_state = room_light._classify(
+            [
+                _feature_frame(
+                    frame_id=1,
+                    stamp=1.0,
+                    luma_mean=0.52855,
+                    luma_std=0.23753,
+                    dynamic_range=0.62294,
+                    saturation_mean=0.13802,
+                    warm_ratio=1.06429,
+                    blue_ratio=1.21429,
+                    lab_b_mean=-0.00318,
+                    edge_density=0.46249,
+                    underexposed_fraction=0.02685,
+                    overexposed_fraction=0.02578,
+                ),
+                _feature_frame(
+                    frame_id=2,
+                    stamp=1.5,
+                    luma_mean=0.52855,
+                    luma_std=0.23753,
+                    dynamic_range=0.62294,
+                    saturation_mean=0.13802,
+                    warm_ratio=1.06429,
+                    blue_ratio=1.21429,
+                    lab_b_mean=-0.00318,
+                    edge_density=0.46249,
+                    underexposed_fraction=0.02685,
+                    overexposed_fraction=0.02578,
+                ),
+            ]
+        )
+
+        self.assertEqual(on_state.state, "on")
+        self.assertEqual(on_state.lighting_type, "mixed")
+        self.assertEqual(off_state.state, "off")
+        self.assertEqual(off_state.lighting_type, "daylight")
 
 
 if __name__ == "__main__":

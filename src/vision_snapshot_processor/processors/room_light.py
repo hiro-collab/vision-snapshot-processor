@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 
-ROOM_LIGHT_MODEL_NAME = "room-light-heuristic-snapshot-v2"
+ROOM_LIGHT_MODEL_NAME = "room-light-heuristic-snapshot-v3"
 
 
 @dataclass(frozen=True)
@@ -249,17 +249,22 @@ def _classify(frames: list[FrameFeatures]) -> RoomLightState:
         - max(0.0, daylight_probability - 0.62) * 0.9
     )
 
-    lighting_type = _lighting_type(electric_probability, daylight_probability, dark_probability)
     daylight_switch_state = _daylight_electric_switch_state(
         summary,
         electric_probability=electric_probability,
         daylight_probability=daylight_probability,
         dark_probability=dark_probability,
     )
+    lighting_type = _lighting_type(electric_probability, daylight_probability, dark_probability)
     state = "unknown"
     confidence = 0.0
     if daylight_switch_state is not None:
         state, confidence = daylight_switch_state
+        lighting_type = _lighting_type_for_daylight_switch_state(
+            state,
+            daylight_probability=daylight_probability,
+            fallback=lighting_type,
+        )
     elif electric_probability >= 0.68 and dark_probability < 0.65:
         state = "on"
         confidence = min(1.0, electric_probability)
@@ -296,6 +301,21 @@ def _lighting_type(electric: float, daylight: float, dark: float) -> str:
     if daylight >= 0.68:
         return "daylight"
     return "unknown"
+
+
+def _lighting_type_for_daylight_switch_state(
+    state: str,
+    *,
+    daylight_probability: float,
+    fallback: str,
+) -> str:
+    if daylight_probability < 0.55:
+        return fallback
+    if state == "on":
+        return "mixed"
+    if state == "off":
+        return "daylight"
+    return fallback
 
 
 def _daylight_electric_switch_state(

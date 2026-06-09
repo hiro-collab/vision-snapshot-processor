@@ -56,4 +56,6 @@ uv run python -m vision_snapshot_processor.main `
 
 初期実装は重い学習モデルを使わない conservative heuristic です。Logitech などの自動明るさ補正を
 前提に、単純な平均輝度ではなく、色度、彩度、局所コントラスト、暗部/白飛び比率、時系列差分を
-時間窓で集約します。daylight が強い場合は電気 OFF と断定せず `unknown` に寄せます。
+時間窓で集約します。daylight が強い場合は基本的に断定を避けつつ、日中ON/OFFのcontrastが
+十分に出る場合だけ、白飛び/暗部/局所エッジ/レンジの組み合わせで `mixed` の電気ONまたは
+`daylight` の電気OFFに寄せます。
