@@ -5,6 +5,11 @@ import unittest
 
 import numpy as np
 
+from vision_snapshot_processor.room_light_evaluator import (
+    RoomLightEvaluationConfig,
+    evaluate_frames,
+    summarize_observations,
+)
 from vision_snapshot_processor.processors.room_light import RoomLightSnapshotProcessor
 from vision_snapshot_processor.processors import room_light
 from vision_snapshot_processor.topics import (
@@ -202,6 +207,97 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         self.assertEqual(on_state.lighting_type, "mixed")
         self.assertEqual(off_state.state, "off")
         self.assertEqual(off_state.lighting_type, "daylight")
+
+    def test_payload_keeps_review_safe_source_and_confidence_fields(self) -> None:
+        state = room_light._classify(
+            [
+                _feature_frame(
+                    frame_id=3,
+                    stamp=3.0,
+                    luma_mean=0.55737,
+                    luma_std=0.27418,
+                    dynamic_range=0.75229,
+                    saturation_mean=0.1178,
+                    warm_ratio=1.01254,
+                    blue_ratio=1.16307,
+                    lab_b_mean=-0.00132,
+                    edge_density=0.53244,
+                    underexposed_fraction=0.00098,
+                    overexposed_fraction=0.09462,
+                ),
+                _feature_frame(
+                    frame_id=4,
+                    stamp=3.5,
+                    luma_mean=0.55737,
+                    luma_std=0.27418,
+                    dynamic_range=0.75229,
+                    saturation_mean=0.1178,
+                    warm_ratio=1.01254,
+                    blue_ratio=1.16307,
+                    lab_b_mean=-0.00132,
+                    edge_density=0.53244,
+                    underexposed_fraction=0.00098,
+                    overexposed_fraction=0.09462,
+                ),
+            ]
+        )
+
+        payload = state.to_payload()
+
+        self.assertEqual(payload["model"]["name"], room_light.ROOM_LIGHT_MODEL_NAME)
+        self.assertIn("confidence", payload)
+        self.assertIn("lighting_type", payload)
+        self.assertIn("electric_light", payload)
+        self.assertIn("daylight", payload)
+        self.assertIn("probabilities", payload)
+        self.assertIn("observation_id", payload)
+        self.assertNotIn("frame", payload)
+        self.assertNotIn("path", payload)
+        self.assertNotIn("entity_id", payload)
+
+    def test_redacted_evaluator_summarizes_local_media_without_source_path(self) -> None:
+        frames = [
+            np.full((48, 64, 3), (20, 160, 230), dtype=np.uint8),
+            np.full((48, 64, 3), (20, 160, 230), dtype=np.uint8),
+            np.full((48, 64, 3), (20, 160, 230), dtype=np.uint8),
+        ]
+
+        summary = evaluate_frames(
+            frames,
+            config=RoomLightEvaluationConfig(
+                sample_id="vision.room_light.synthetic_on",
+                expected_state="on",
+                max_frames=3,
+            ),
+        )
+
+        self.assertEqual(summary["type"], "room_light_local_media_evaluation")
+        self.assertEqual(summary["sample_id"], "vision.room_light.synthetic_on")
+        self.assertEqual(summary["result"], "pass")
+        self.assertEqual(summary["frames_seen"], 3)
+        self.assertEqual(summary["frames_sampled"], 3)
+        self.assertFalse(summary["raw_media_included"])
+        self.assertFalse(summary["raw_frame_included"])
+        self.assertFalse(summary["source_path_included"])
+        self.assertIn("final", summary)
+        self.assertNotIn("input", summary)
+        self.assertNotIn("source_path", summary)
+        self.assertIn(
+            "room_light_estimate_not_physical_switch_state",
+            summary["non_claims"],
+        )
+
+    def test_redacted_evaluator_reports_missing_observations_as_not_evaluated(self) -> None:
+        summary = summarize_observations(
+            [],
+            config=RoomLightEvaluationConfig(sample_id="empty"),
+            frames_seen=0,
+            frames_sampled=0,
+        )
+
+        self.assertEqual(summary["result"], "not_evaluated")
+        self.assertEqual(summary["observations"], 0)
+        self.assertNotIn("final", summary)
 
 
 if __name__ == "__main__":
