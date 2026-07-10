@@ -9,13 +9,13 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
-from .processors.room_light import ROOM_LIGHT_MODEL_NAME, RoomLightSnapshotProcessor, RoomLightState
+from .processors.room_light import ROOM_LIGHT_MODEL_NAME, RoomLightObservation, RoomLightSnapshotProcessor
 
 
 @dataclass(frozen=True)
 class RoomLightEvaluationConfig:
     sample_id: str
-    expected_state: str | None = None
+    expected_observation_bucket: str | None = None
     max_frames: int = 120
     sample_every_frames: int = 1
     min_frames: int = 2
@@ -35,7 +35,7 @@ def evaluate_frames(
         window_ms=config.window_ms,
         resize_width=config.resize_width,
     )
-    observations: list[RoomLightState] = []
+    observations: list[RoomLightObservation] = []
     frames_seen = 0
     frames_sampled = 0
 
@@ -46,13 +46,13 @@ def evaluate_frames(
         if (frames_seen - 1) % config.sample_every_frames != 0:
             continue
         frames_sampled += 1
-        state = processor.observe(
+        observation = processor.observe(
             frame,
             frame_id=frames_seen,
             stamp=start_stamp + (frames_seen - 1) * frame_interval_s,
         )
-        if state is not None:
-            observations.append(state)
+        if observation is not None:
+            observations.append(observation)
 
     return summarize_observations(
         observations,
@@ -83,57 +83,65 @@ def evaluate_video_file(path: Path, *, config: RoomLightEvaluationConfig) -> dic
 
 
 def summarize_observations(
-    observations: list[RoomLightState],
+    observations: list[RoomLightObservation],
     *,
     config: RoomLightEvaluationConfig,
     frames_seen: int,
     frames_sampled: int,
 ) -> dict[str, Any]:
-    final_state = observations[-1] if observations else None
-    expected_state = _clean_expected_state(config.expected_state)
+    final_observation = observations[-1] if observations else None
+    expected_observation_bucket = _clean_expected_observation_bucket(config.expected_observation_bucket)
     result = "not_evaluated"
-    if expected_state is not None:
-        result = "pass" if final_state is not None and final_state.state == expected_state else "fail"
-    elif final_state is not None:
+    if expected_observation_bucket is not None:
+        result = (
+            "pass"
+            if final_observation is not None
+            and final_observation.observation_bucket == expected_observation_bucket
+            else "fail"
+        )
+    elif final_observation is not None:
         result = "observed"
 
-    state_counts: dict[str, int] = {}
+    observation_bucket_counts: dict[str, int] = {}
     for observation in observations:
-        state_counts[observation.state] = state_counts.get(observation.state, 0) + 1
+        bucket = observation.observation_bucket
+        observation_bucket_counts[bucket] = observation_bucket_counts.get(bucket, 0) + 1
 
     summary: dict[str, Any] = {
         "type": "room_light_local_media_evaluation",
         "schema_version": 1,
         "sample_id": config.sample_id,
-        "expected_state": expected_state,
+        "expected_observation_bucket": expected_observation_bucket,
         "result": result,
         "model": ROOM_LIGHT_MODEL_NAME,
         "frames_seen": frames_seen,
         "frames_sampled": frames_sampled,
         "observations": len(observations),
-        "state_counts": state_counts,
+        "observation_bucket_counts": observation_bucket_counts,
         "raw_media_included": False,
         "raw_frame_included": False,
         "source_path_included": False,
         "non_claims": [
             "local_media_result_not_live_room_proof",
-            "room_light_estimate_not_physical_switch_state",
-            "electric_light_probability_not_robust_electric_light_proof",
+            "room_light_observation_not_physical_switch_proof",
+            "warm_light_cue_not_electric_fixture_proof",
         ],
     }
-    if final_state is not None:
-        payload = final_state.to_payload()
+    if final_observation is not None:
+        payload = final_observation.to_payload()
         summary["final"] = {
-            "state": payload["state"],
+            "observation_bucket": payload["observation_bucket"],
             "confidence": payload["confidence"],
-            "lighting_type": payload["lighting_type"],
-            "electric_light": payload["electric_light"],
-            "daylight": payload["daylight"],
-            "probabilities": payload["probabilities"],
+            "daylight_ambiguity": payload["daylight_ambiguity"],
+            "cue_likelihoods": payload["cue_likelihoods"],
+            "source": payload["source"],
+            "source_class": payload["source_class"],
             "observed_at": payload["observed_at"],
             "observation_id": payload["observation_id"],
             "sequence": payload["sequence"],
             "model": payload["model"],
+            "proof_ceiling": payload["proof_ceiling"],
+            "does_not_prove": payload["does_not_prove"],
         }
     return summary
 
@@ -145,7 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", required=True, help="Local media path. The path is never echoed in JSON output.")
     parser.add_argument("--sample-id", required=True, help="Stable sample id to include in redacted output.")
-    parser.add_argument("--expected-state", choices=["on", "off", "unknown"])
+    parser.add_argument(
+        "--expected-observation-bucket",
+        choices=["dark", "dim", "balanced", "bright"],
+    )
     parser.add_argument("--max-frames", type=_positive_int, default=120)
     parser.add_argument("--sample-every-frames", type=_positive_int, default=1)
     parser.add_argument("--min-frames", type=_min_frames, default=2)
@@ -159,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = RoomLightEvaluationConfig(
         sample_id=args.sample_id,
-        expected_state=args.expected_state,
+        expected_observation_bucket=args.expected_observation_bucket,
         max_frames=args.max_frames,
         sample_every_frames=args.sample_every_frames,
         min_frames=args.min_frames,
@@ -171,11 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _clean_expected_state(value: str | None) -> str | None:
+def _clean_expected_observation_bucket(value: str | None) -> str | None:
     if value is None:
         return None
-    if value not in {"on", "off", "unknown"}:
-        raise ValueError("expected_state must be on, off, unknown, or None")
+    if value not in {"dark", "dim", "balanced", "bright"}:
+        raise ValueError("expected_observation_bucket must be dark, dim, balanced, bright, or None")
     return value
 
 

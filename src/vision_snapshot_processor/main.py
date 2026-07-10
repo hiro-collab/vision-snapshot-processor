@@ -12,7 +12,7 @@ from urllib.request import url2pathname
 import cv2
 
 from .processors.room_light import RoomLightSnapshotProcessor
-from .topics import MSG_TYPE_ROOM_LIGHT_STATE, ROOM_LIGHT_STATE_TOPIC, topic_json
+from .topics import MSG_TYPE_ROOM_LIGHT_OBSERVATION, ROOM_LIGHT_OBSERVATION_TOPIC, topic_json
 from .websocket import WebSocketTopicBroadcaster
 
 
@@ -169,15 +169,15 @@ async def run(args: argparse.Namespace) -> None:
                     continue
                 frame_number += 1
                 if room_light is not None:
-                    state = room_light.observe(frame, frame_id=frame_number, stamp=stamp)
-                    if state is not None:
+                    observation = room_light.observe(frame, frame_id=frame_number, stamp=stamp)
+                    if observation is not None:
                         await broadcaster.publish(
                             topic_json(
-                                ROOM_LIGHT_STATE_TOPIC,
-                                MSG_TYPE_ROOM_LIGHT_STATE,
-                                state.to_payload(),
+                                ROOM_LIGHT_OBSERVATION_TOPIC,
+                                MSG_TYPE_ROOM_LIGHT_OBSERVATION,
+                                observation.to_payload(),
                                 sequence=frame_number,
-                                stamp=state.observed_at,
+                                stamp=observation.observed_at,
                                 frame_id=args.frame_id,
                             )
                         )

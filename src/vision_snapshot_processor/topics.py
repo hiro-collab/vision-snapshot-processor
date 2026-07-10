@@ -10,8 +10,8 @@ from typing import Mapping
 TOPIC_ENVELOPE_SCHEMA_VERSION = 1
 MAX_SEQUENCE = 2**63 - 1
 
-ROOM_LIGHT_STATE_TOPIC = "/vision/room_light/state"
-MSG_TYPE_ROOM_LIGHT_STATE = "vision_snapshot_processor/RoomLightState"
+ROOM_LIGHT_OBSERVATION_TOPIC = "/vision/room_light/observation"
+MSG_TYPE_ROOM_LIGHT_OBSERVATION = "vision_snapshot_processor/RoomLightObservation"
 
 
 @dataclass(frozen=True)

@@ -1,13 +1,13 @@
 # Vision Snapshot Processor
 
-Camera Hub / MediaMTX の映像 stream から低頻度 snapshot を取り、軽量な vision state を
+Camera Hub / MediaMTX の映像 stream から低頻度 snapshot を取り、軽量な room-light observation を
 Camera Hub topic envelope 互換の WebSocket topic として配信する独立 module です。
 
 ## Role
 
 - MediaMTX の RTSP stream を読む。
 - snapshot 系 processor を実行する。
-- `/vision/.../state` topic を WebSocket で配信する。
+- `/vision/.../observation` topic を WebSocket で配信する。
 
 この module は物理カメラを直接開きません。Environment State Server への HTTP 書き込みや
 Dify 向け snapshot 集約も担当しません。
@@ -16,7 +16,7 @@ Dify 向け snapshot 集約も担当しません。
 
 | Processor | Topic | Purpose |
 |---|---|---|
-| `room_light` | `/vision/room_light/state` | 室内照明が点灯している可能性 |
+| `room_light` | `/vision/room_light/observation` | 室内の明るさと光の手掛かりの観測 |
 
 将来は同じ runtime に、在室、窓・カーテン状態、特定物体状態などの snapshot processor を追加できます。
 
@@ -28,7 +28,7 @@ uv run python -m unittest discover -s tests
 ```
 
 通常運用では、先に USB camera を FFmpeg / MediaMTX / Camera Hub 側で配信しておきます。この organ は
-RTSP stream を低頻度で読み、snapshot state topic を出すだけです。
+RTSP stream を低頻度で読み、snapshot observation topic を出すだけです。
 
 ## dotenv / local config
 
@@ -56,6 +56,8 @@ uv run python -m vision_snapshot_processor.main `
 
 初期実装は重い学習モデルを使わない conservative heuristic です。Logitech などの自動明るさ補正を
 前提に、単純な平均輝度ではなく、色度、彩度、局所コントラスト、暗部/白飛び比率、時系列差分を
-時間窓で集約します。daylight が強い場合は基本的に断定を避けつつ、日中ON/OFFのcontrastが
-十分に出る場合だけ、白飛び/暗部/局所エッジ/レンジの組み合わせで `mixed` の電気ONまたは
-`daylight` の電気OFFに寄せます。
+時間窓で集約します。出力は `dark`、`dim`、`balanced`、`bright` の observation bucket と、
+`warm_light`、`daylight`、`darkness` の cue likelihoods です。暖色と daylight の手掛かりが
+競合する場合は `daylight_ambiguity` を上げます。payload の `does_not_prove` は
+`physical_room_light_state`、`home_assistant_light_state` をこの順序で出力します。これは camera/environment
+estimate の境界であり、物理的な room-light state も Home Assistant light state も証明しません。

@@ -13,8 +13,8 @@ from vision_snapshot_processor.room_light_evaluator import (
 from vision_snapshot_processor.processors.room_light import RoomLightSnapshotProcessor
 from vision_snapshot_processor.processors import room_light
 from vision_snapshot_processor.topics import (
-    MSG_TYPE_ROOM_LIGHT_STATE,
-    ROOM_LIGHT_STATE_TOPIC,
+    MSG_TYPE_ROOM_LIGHT_OBSERVATION,
+    ROOM_LIGHT_OBSERVATION_TOPIC,
     topic_json,
 )
 
@@ -55,29 +55,29 @@ def _feature_frame(
 
 
 class RoomLightSnapshotProcessorTest(unittest.TestCase):
-    def test_requires_two_frames_before_state(self) -> None:
+    def test_requires_two_frames_before_observation(self) -> None:
         processor = RoomLightSnapshotProcessor(min_frames=2, window_ms=1000)
         frame = np.zeros((48, 64, 3), dtype=np.uint8)
 
         self.assertIsNone(processor.observe(frame, frame_id=1, stamp=1.0))
-        state = processor.observe(frame, frame_id=2, stamp=1.5)
+        observation = processor.observe(frame, frame_id=2, stamp=1.5)
 
-        self.assertIsNotNone(state)
-        assert state is not None
-        self.assertEqual(state.frame_count, 2)
-        self.assertGreaterEqual(state.temporal_window_ms, 500)
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.frame_count, 2)
+        self.assertGreaterEqual(observation.temporal_window_ms, 500)
 
-    def test_dark_frames_are_electric_off_with_confidence(self) -> None:
+    def test_dark_frames_produce_dark_observation_with_confidence(self) -> None:
         processor = RoomLightSnapshotProcessor(min_frames=2, window_ms=1000)
         frame = np.full((48, 64, 3), 2, dtype=np.uint8)
 
         processor.observe(frame, frame_id=1, stamp=1.0)
-        state = processor.observe(frame, frame_id=2, stamp=1.5)
+        observation = processor.observe(frame, frame_id=2, stamp=1.5)
 
-        assert state is not None
-        payload = state.to_payload()
-        self.assertEqual(payload["state"], "off")
-        self.assertEqual(payload["lighting_type"], "dark")
+        assert observation is not None
+        payload = observation.to_payload()
+        self.assertEqual(payload["observation_bucket"], "dark")
+        self.assertGreater(payload["cue_likelihoods"]["darkness"], 0.5)
         self.assertGreater(payload["confidence"], 0.5)
         self.assertEqual(payload["sequence"]["frame_count"], 2)
 
@@ -85,131 +85,66 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         processor = RoomLightSnapshotProcessor(min_frames=2, window_ms=1000)
         frame = np.full((48, 64, 3), (20, 160, 230), dtype=np.uint8)
         processor.observe(frame, frame_id=10, stamp=10.0)
-        state = processor.observe(frame, frame_id=11, stamp=11.0)
-        assert state is not None
+        observation = processor.observe(frame, frame_id=11, stamp=11.0)
+        assert observation is not None
 
         envelope = json.loads(
             topic_json(
-                ROOM_LIGHT_STATE_TOPIC,
-                MSG_TYPE_ROOM_LIGHT_STATE,
-                state.to_payload(),
+                ROOM_LIGHT_OBSERVATION_TOPIC,
+                MSG_TYPE_ROOM_LIGHT_OBSERVATION,
+                observation.to_payload(),
                 sequence=11,
                 stamp=11.0,
                 frame_id="cam0",
             )
         )
 
-        self.assertEqual(envelope["topic"], "/vision/room_light/state")
-        self.assertEqual(envelope["msg_type"], "vision_snapshot_processor/RoomLightState")
+        self.assertEqual(envelope["topic"], "/vision/room_light/observation")
+        self.assertEqual(envelope["msg_type"], "vision_snapshot_processor/RoomLightObservation")
         self.assertEqual(envelope["header"]["frame_id"], "cam0")
-        self.assertEqual(envelope["payload"]["type"], "room_light_state")
+        self.assertEqual(envelope["payload"]["type"], "room_light_observation")
 
-    def test_daylight_switch_calibration_distinguishes_electric_light(self) -> None:
-        on_state = room_light._daylight_electric_switch_state(
-            {
-                "luma_mean": 0.56,
-                "dynamic_range": 0.74,
-                "overexposed_fraction": 0.09,
-                "underexposed_fraction": 0.002,
-                "edge_density": 0.50,
-            },
-            electric_probability=0.62,
-            daylight_probability=0.78,
-            dark_probability=0.05,
-        )
-        off_state = room_light._daylight_electric_switch_state(
-            {
-                "luma_mean": 0.48,
-                "dynamic_range": 0.60,
-                "overexposed_fraction": 0.02,
-                "underexposed_fraction": 0.04,
-                "edge_density": 0.45,
-            },
-            electric_probability=0.59,
-            daylight_probability=0.66,
-            dark_probability=0.12,
-        )
-
-        self.assertIsNotNone(on_state)
-        self.assertIsNotNone(off_state)
-        assert on_state is not None
-        assert off_state is not None
-        self.assertEqual(on_state[0], "on")
-        self.assertEqual(off_state[0], "off")
-
-    def test_daylight_switch_calibration_updates_lighting_type(self) -> None:
-        on_state = room_light._classify(
+    def test_warm_and_daylight_cues_raise_daylight_ambiguity(self) -> None:
+        observation = room_light._classify(
             [
                 _feature_frame(
                     frame_id=1,
                     stamp=1.0,
-                    luma_mean=0.55737,
-                    luma_std=0.27418,
-                    dynamic_range=0.75229,
-                    saturation_mean=0.1178,
-                    warm_ratio=1.01254,
-                    blue_ratio=1.16307,
-                    lab_b_mean=-0.00132,
-                    edge_density=0.53244,
-                    underexposed_fraction=0.00098,
-                    overexposed_fraction=0.09462,
+                    luma_mean=0.56,
+                    luma_std=0.27,
+                    dynamic_range=0.74,
+                    saturation_mean=0.12,
+                    warm_ratio=1.12,
+                    blue_ratio=1.08,
+                    lab_b_mean=0.04,
+                    edge_density=0.50,
+                    underexposed_fraction=0.002,
+                    overexposed_fraction=0.09,
                 ),
                 _feature_frame(
                     frame_id=2,
                     stamp=1.5,
-                    luma_mean=0.55737,
-                    luma_std=0.27418,
-                    dynamic_range=0.75229,
-                    saturation_mean=0.1178,
-                    warm_ratio=1.01254,
-                    blue_ratio=1.16307,
-                    lab_b_mean=-0.00132,
-                    edge_density=0.53244,
-                    underexposed_fraction=0.00098,
-                    overexposed_fraction=0.09462,
-                ),
-            ]
-        )
-        off_state = room_light._classify(
-            [
-                _feature_frame(
-                    frame_id=1,
-                    stamp=1.0,
-                    luma_mean=0.52855,
-                    luma_std=0.23753,
-                    dynamic_range=0.62294,
-                    saturation_mean=0.13802,
-                    warm_ratio=1.06429,
-                    blue_ratio=1.21429,
-                    lab_b_mean=-0.00318,
-                    edge_density=0.46249,
-                    underexposed_fraction=0.02685,
-                    overexposed_fraction=0.02578,
-                ),
-                _feature_frame(
-                    frame_id=2,
-                    stamp=1.5,
-                    luma_mean=0.52855,
-                    luma_std=0.23753,
-                    dynamic_range=0.62294,
-                    saturation_mean=0.13802,
-                    warm_ratio=1.06429,
-                    blue_ratio=1.21429,
-                    lab_b_mean=-0.00318,
-                    edge_density=0.46249,
-                    underexposed_fraction=0.02685,
-                    overexposed_fraction=0.02578,
+                    luma_mean=0.56,
+                    luma_std=0.27,
+                    dynamic_range=0.74,
+                    saturation_mean=0.12,
+                    warm_ratio=1.12,
+                    blue_ratio=1.08,
+                    lab_b_mean=0.04,
+                    edge_density=0.50,
+                    underexposed_fraction=0.002,
+                    overexposed_fraction=0.09,
                 ),
             ]
         )
 
-        self.assertEqual(on_state.state, "on")
-        self.assertEqual(on_state.lighting_type, "mixed")
-        self.assertEqual(off_state.state, "off")
-        self.assertEqual(off_state.lighting_type, "daylight")
+        self.assertEqual(observation.observation_bucket, "bright")
+        self.assertEqual(observation.daylight_ambiguity, "high")
+        self.assertIn("warm_light", observation.cue_likelihoods)
+        self.assertIn("daylight", observation.cue_likelihoods)
 
     def test_payload_keeps_review_safe_source_and_confidence_fields(self) -> None:
-        state = room_light._classify(
+        observation = room_light._classify(
             [
                 _feature_frame(
                     frame_id=3,
@@ -242,14 +177,21 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
             ]
         )
 
-        payload = state.to_payload()
+        payload = observation.to_payload()
 
         self.assertEqual(payload["model"]["name"], room_light.ROOM_LIGHT_MODEL_NAME)
+        self.assertEqual(payload["type"], "room_light_observation")
+        self.assertIn("observation_bucket", payload)
         self.assertIn("confidence", payload)
-        self.assertIn("lighting_type", payload)
-        self.assertIn("electric_light", payload)
-        self.assertIn("daylight", payload)
-        self.assertIn("probabilities", payload)
+        self.assertIn("daylight_ambiguity", payload)
+        self.assertEqual(set(payload["cue_likelihoods"]), {"warm_light", "daylight", "darkness"})
+        self.assertEqual(payload["source"], "vision_snapshot_processor")
+        self.assertEqual(payload["source_class"], "camera_environment_estimate")
+        self.assertEqual(payload["proof_ceiling"], "camera_environment_estimate_only")
+        self.assertEqual(
+            payload["does_not_prove"],
+            ["physical_room_light_state", "home_assistant_light_state"],
+        )
         self.assertIn("observation_id", payload)
         self.assertNotIn("frame", payload)
         self.assertNotIn("path", payload)
@@ -265,14 +207,14 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         summary = evaluate_frames(
             frames,
             config=RoomLightEvaluationConfig(
-                sample_id="vision.room_light.synthetic_on",
-                expected_state="on",
+                sample_id="vision.room_light.synthetic_warm",
+                expected_observation_bucket="balanced",
                 max_frames=3,
             ),
         )
 
         self.assertEqual(summary["type"], "room_light_local_media_evaluation")
-        self.assertEqual(summary["sample_id"], "vision.room_light.synthetic_on")
+        self.assertEqual(summary["sample_id"], "vision.room_light.synthetic_warm")
         self.assertEqual(summary["result"], "pass")
         self.assertEqual(summary["frames_seen"], 3)
         self.assertEqual(summary["frames_sampled"], 3)
@@ -280,10 +222,11 @@ class RoomLightSnapshotProcessorTest(unittest.TestCase):
         self.assertFalse(summary["raw_frame_included"])
         self.assertFalse(summary["source_path_included"])
         self.assertIn("final", summary)
+        self.assertIn("observation_bucket_counts", summary)
         self.assertNotIn("input", summary)
         self.assertNotIn("source_path", summary)
         self.assertIn(
-            "room_light_estimate_not_physical_switch_state",
+            "room_light_observation_not_physical_switch_proof",
             summary["non_claims"],
         )
 

@@ -13,6 +13,10 @@ import numpy as np
 
 
 ROOM_LIGHT_MODEL_NAME = "room-light-heuristic-snapshot-v3"
+ROOM_LIGHT_DOES_NOT_PROVE = (
+    "physical_room_light_state",
+    "home_assistant_light_state",
+)
 
 
 @dataclass(frozen=True)
@@ -36,13 +40,11 @@ class FrameFeatures:
 
 
 @dataclass(frozen=True)
-class RoomLightState:
-    state: str
+class RoomLightObservation:
+    observation_bucket: str
     confidence: float
-    lighting_type: str
-    electric_probability: float
-    daylight_probability: float
-    dark_probability: float
+    daylight_ambiguity: str
+    cue_likelihoods: dict[str, float]
     observed_at: float
     first_frame_id: int
     last_frame_id: int
@@ -56,35 +58,22 @@ class RoomLightState:
             self.first_frame_id,
             self.last_frame_id,
             self.observed_at,
-            self.electric_probability,
-            self.daylight_probability,
+            self.observation_bucket,
+            self.cue_likelihoods["warm_light"],
+            self.cue_likelihoods["daylight"],
+            self.cue_likelihoods["darkness"],
         )
-        daylight_state = _ternary_state(self.daylight_probability, high=0.65, low=0.35)
-        if daylight_state == "on":
-            daylight_state = "present"
-        elif daylight_state == "off":
-            daylight_state = "absent"
-
         return {
-            "type": "room_light_state",
+            "type": "room_light_observation",
             "schema_version": 1,
-            "label": self.lighting_type,
-            "state": self.state,
+            "observation_bucket": self.observation_bucket,
             "confidence": round(self.confidence, 4),
-            "lighting_type": self.lighting_type,
-            "electric_light": {
-                "state": self.state,
-                "probability": round(self.electric_probability, 4),
+            "daylight_ambiguity": self.daylight_ambiguity,
+            "cue_likelihoods": {
+                name: round(value, 4) for name, value in self.cue_likelihoods.items()
             },
-            "daylight": {
-                "state": daylight_state,
-                "probability": round(self.daylight_probability, 4),
-            },
-            "probabilities": {
-                "electric_on": round(self.electric_probability, 4),
-                "daylight_present": round(self.daylight_probability, 4),
-                "dark": round(self.dark_probability, 4),
-            },
+            "source": "vision_snapshot_processor",
+            "source_class": "camera_environment_estimate",
             "observed_at": observed_at,
             "observation_id": observation_id,
             "sequence": {
@@ -97,15 +86,8 @@ class RoomLightState:
                 "name": ROOM_LIGHT_MODEL_NAME,
                 "kind": "heuristic",
             },
-            "evidence": {
-                "model": {
-                    "name": ROOM_LIGHT_MODEL_NAME,
-                    "kind": "heuristic",
-                },
-                "frames": self.frame_count,
-                "temporal_window_ms": self.temporal_window_ms,
-                "features": self.feature_summary,
-            },
+            "proof_ceiling": "camera_environment_estimate_only",
+            "does_not_prove": list(ROOM_LIGHT_DOES_NOT_PROVE),
         }
 
 
@@ -128,7 +110,7 @@ class RoomLightSnapshotProcessor:
         self.resize_width = int(resize_width)
         self._frames: deque[FrameFeatures] = deque()
 
-    def observe(self, frame_bgr: np.ndarray, *, frame_id: int, stamp: float | None = None) -> RoomLightState | None:
+    def observe(self, frame_bgr: np.ndarray, *, frame_id: int, stamp: float | None = None) -> RoomLightObservation | None:
         if frame_bgr is None or not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
             return None
         observed_at = time.time() if stamp is None else float(stamp)
@@ -211,7 +193,7 @@ def _extract_features(
     )
 
 
-def _classify(frames: list[FrameFeatures]) -> RoomLightState:
+def _classify(frames: list[FrameFeatures]) -> RoomLightObservation:
     summary = {
         "luma_mean": _mean(frames, "luma_mean"),
         "luma_std": _mean(frames, "luma_std"),
@@ -226,62 +208,51 @@ def _classify(frames: list[FrameFeatures]) -> RoomLightState:
         "temporal_delta": _mean(frames[1:], "temporal_delta") if len(frames) > 1 else 0.0,
     }
 
-    dark_probability = _sigmoid(
+    darkness_likelihood = _sigmoid(
         (0.20 - summary["luma_mean"]) * 7.0
         + (0.16 - summary["luma_std"]) * 3.0
         + summary["underexposed_fraction"] * 2.8
         - summary["overexposed_fraction"] * 2.0
     )
-    daylight_probability = _sigmoid(
+    daylight_likelihood = _sigmoid(
         (summary["luma_mean"] - 0.44) * 2.4
         + (summary["dynamic_range"] - 0.38) * 2.0
         + (summary["blue_ratio"] - 1.02) * 2.2
         - (summary["lab_b_mean"] * 1.4)
-        - dark_probability * 1.2
+        - darkness_likelihood * 1.2
     )
-    electric_probability = _sigmoid(
+    warm_light_likelihood = _sigmoid(
         (summary["warm_ratio"] - 1.04) * 3.0
         + (summary["lab_b_mean"] - 0.015) * 2.2
         + (summary["saturation_mean"] - 0.12) * 1.1
         + (summary["edge_density"] - 0.04) * 1.0
         + (summary["luma_mean"] - 0.28) * 1.1
-        - dark_probability * 1.8
-        - max(0.0, daylight_probability - 0.62) * 0.9
+        - darkness_likelihood * 1.8
+        - max(0.0, daylight_likelihood - 0.62) * 0.9
     )
-
-    daylight_switch_state = _daylight_electric_switch_state(
+    observation_bucket, confidence = _observation_bucket(
         summary,
-        electric_probability=electric_probability,
-        daylight_probability=daylight_probability,
-        dark_probability=dark_probability,
+        darkness_likelihood=darkness_likelihood,
+        daylight_likelihood=daylight_likelihood,
     )
-    lighting_type = _lighting_type(electric_probability, daylight_probability, dark_probability)
-    state = "unknown"
-    confidence = 0.0
-    if daylight_switch_state is not None:
-        state, confidence = daylight_switch_state
-        lighting_type = _lighting_type_for_daylight_switch_state(
-            state,
-            daylight_probability=daylight_probability,
-            fallback=lighting_type,
-        )
-    elif electric_probability >= 0.68 and dark_probability < 0.65:
-        state = "on"
-        confidence = min(1.0, electric_probability)
-    elif electric_probability <= 0.28 and dark_probability >= 0.58 and daylight_probability <= 0.42:
-        state = "off"
-        confidence = min(1.0, (1.0 - electric_probability) * dark_probability)
+    daylight_ambiguity = _daylight_ambiguity(
+        daylight_likelihood=daylight_likelihood,
+        warm_light_likelihood=warm_light_likelihood,
+        darkness_likelihood=darkness_likelihood,
+    )
 
     first = frames[0]
     last = frames[-1]
     temporal_window_ms = max(0, int(round((last.stamp - first.stamp) * 1000.0)))
-    return RoomLightState(
-        state=state,
+    return RoomLightObservation(
+        observation_bucket=observation_bucket,
         confidence=_clamp_float(confidence, 0.0, 1.0),
-        lighting_type=lighting_type,
-        electric_probability=_clamp_float(electric_probability, 0.0, 1.0),
-        daylight_probability=_clamp_float(daylight_probability, 0.0, 1.0),
-        dark_probability=_clamp_float(dark_probability, 0.0, 1.0),
+        daylight_ambiguity=daylight_ambiguity,
+        cue_likelihoods={
+            "warm_light": _clamp_float(warm_light_likelihood, 0.0, 1.0),
+            "daylight": _clamp_float(daylight_likelihood, 0.0, 1.0),
+            "darkness": _clamp_float(darkness_likelihood, 0.0, 1.0),
+        },
         observed_at=last.stamp,
         first_frame_id=first.frame_id,
         last_frame_id=last.frame_id,
@@ -291,72 +262,39 @@ def _classify(frames: list[FrameFeatures]) -> RoomLightState:
     )
 
 
-def _lighting_type(electric: float, daylight: float, dark: float) -> str:
-    if dark >= 0.72 and electric < 0.45 and daylight < 0.45:
-        return "dark"
-    if electric >= 0.62 and daylight >= 0.50:
-        return "mixed"
-    if electric >= 0.68:
-        return "electric"
-    if daylight >= 0.68:
-        return "daylight"
-    return "unknown"
-
-
-def _lighting_type_for_daylight_switch_state(
-    state: str,
-    *,
-    daylight_probability: float,
-    fallback: str,
-) -> str:
-    if daylight_probability < 0.55:
-        return fallback
-    if state == "on":
-        return "mixed"
-    if state == "off":
-        return "daylight"
-    return fallback
-
-
-def _daylight_electric_switch_state(
+def _observation_bucket(
     summary: dict[str, float],
     *,
-    electric_probability: float,
-    daylight_probability: float,
-    dark_probability: float,
-) -> tuple[str, float] | None:
-    if daylight_probability < 0.55 or dark_probability >= 0.30:
-        return None
-
-    bright_electric_signature = (
-        summary["luma_mean"] >= 0.535
-        and summary["dynamic_range"] >= 0.70
-        and summary["overexposed_fraction"] >= 0.06
-        and summary["underexposed_fraction"] <= 0.01
-        and summary["edge_density"] >= 0.47
+    darkness_likelihood: float,
+    daylight_likelihood: float,
+) -> tuple[str, float]:
+    if darkness_likelihood >= 0.72:
+        return "dark", darkness_likelihood
+    if summary["luma_mean"] < 0.36 or darkness_likelihood >= 0.52:
+        return "dim", max(darkness_likelihood, 1.0 - summary["luma_mean"])
+    if summary["luma_mean"] >= 0.68 or (
+        daylight_likelihood >= 0.72 and summary["luma_mean"] >= 0.55
+    ):
+        return "bright", max(daylight_likelihood, summary["luma_mean"])
+    distance_to_boundary = min(
+        abs(summary["luma_mean"] - 0.36),
+        abs(summary["luma_mean"] - 0.68),
     )
-    daylight_without_electric_signature = (
-        summary["luma_mean"] <= 0.54
-        and summary["dynamic_range"] <= 0.69
-        and summary["overexposed_fraction"] <= 0.055
-        and summary["underexposed_fraction"] >= 0.018
-    )
-
-    if bright_electric_signature:
-        confidence = 0.68 + min(0.18, max(0.0, electric_probability - 0.58))
-        return ("on", _clamp_float(confidence, 0.0, 1.0))
-    if daylight_without_electric_signature:
-        confidence = 0.62 + min(0.16, max(0.0, daylight_probability - 0.55))
-        return ("off", _clamp_float(confidence, 0.0, 1.0))
-    return None
+    return "balanced", _clamp_float(0.55 + distance_to_boundary * 1.6, 0.0, 1.0)
 
 
-def _ternary_state(probability: float, *, high: float, low: float) -> str:
-    if probability >= high:
-        return "on"
-    if probability <= low:
-        return "off"
-    return "unknown"
+def _daylight_ambiguity(
+    *,
+    daylight_likelihood: float,
+    warm_light_likelihood: float,
+    darkness_likelihood: float,
+) -> str:
+    mixed_cues = daylight_likelihood >= 0.55 and warm_light_likelihood >= 0.55
+    if darkness_likelihood < 0.45 and (0.35 <= daylight_likelihood <= 0.65 or mixed_cues):
+        return "high"
+    if 0.20 <= daylight_likelihood <= 0.80:
+        return "medium"
+    return "low"
 
 
 def _observation_id(*values: object) -> str:
