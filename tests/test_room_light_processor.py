@@ -331,6 +331,19 @@ def _feature_frame(
 
 
 class RoomLightSnapshotProcessorTest(unittest.TestCase):
+    def test_reset_prevents_pre_disconnect_frame_from_joining_new_generation(self) -> None:
+        processor = RoomLightSnapshotProcessor(min_frames=2, window_ms=1000)
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+
+        self.assertIsNone(processor.observe(frame, frame_id=1, stamp=1.0))
+        processor.reset()
+        self.assertIsNone(processor.observe(frame, frame_id=2, stamp=20.0))
+        observation = processor.observe(frame, frame_id=3, stamp=20.1)
+
+        self.assertIsNotNone(observation)
+        self.assertEqual(observation.first_frame_id, 2)
+        self.assertEqual(observation.last_frame_id, 3)
+
     def test_shared_vector_loader_failures_are_fixed_non_echo(self) -> None:
         original_present = _SHARED_VECTOR_ENV in os.environ
         original_value = os.environ.get(_SHARED_VECTOR_ENV)

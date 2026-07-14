@@ -110,6 +110,9 @@ class RoomLightSnapshotProcessor:
         self.resize_width = int(resize_width)
         self._frames: deque[FrameFeatures] = deque()
 
+    def reset(self) -> None:
+        self._frames.clear()
+
     def observe(self, frame_bgr: np.ndarray, *, frame_id: int, stamp: float | None = None) -> RoomLightObservation | None:
         if frame_bgr is None or not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
             return None

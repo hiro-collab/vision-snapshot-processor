@@ -19,6 +19,21 @@ from .websocket import WebSocketTopicBroadcaster
 DEFAULT_OPENCV_FFMPEG_CAPTURE_OPTIONS = (
     "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|reorder_queue_size;0"
 )
+CAPTURE_OPEN_TIMEOUT_MS = 1000
+CAPTURE_READ_TIMEOUT_MS = 1000
+
+
+def open_bounded_video_capture(value: str):
+    return cv2.VideoCapture(
+        value,
+        cv2.CAP_FFMPEG,
+        [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+            CAPTURE_OPEN_TIMEOUT_MS,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+            CAPTURE_READ_TIMEOUT_MS,
+        ],
+    )
 
 
 def parse_port(value: str) -> int:
@@ -85,6 +100,95 @@ def normalize_camera_source_for_capture(value: str) -> str:
     return path
 
 
+def camera_source_class(value: str) -> str:
+    scheme = urlsplit(value).scheme.lower()
+    if scheme == "file":
+        return "local_file"
+    if scheme in {"rtsp", "rtsps"}:
+        return "rtsp_stream"
+    if scheme in {"http", "https"}:
+        return "http_stream"
+    return "unsupported"
+
+
+class RecoveringVideoCapture:
+    """Own one configured source and reopen only that source after loss."""
+
+    def __init__(self, source: str, args: argparse.Namespace, *, opener=None) -> None:
+        self.source = source
+        self.args = args
+        self._opener = opener or open_bounded_video_capture
+        self._capture = None
+        self._read_failures = 0
+        self._retry_delay = 0.25
+
+    @property
+    def is_opened(self) -> bool:
+        return self._capture is not None and bool(self._capture.isOpened())
+
+    def open_once(self) -> tuple[bool, float]:
+        self._release_current()
+        candidate = None
+        try:
+            candidate = self._opener(self.source)
+            self._configure(candidate)
+            if not candidate.isOpened():
+                return self._reject_candidate(candidate)
+        except Exception:
+            return self._reject_candidate(candidate)
+        self._capture = candidate
+        self._read_failures = 0
+        self._retry_delay = 0.25
+        return True, 0.0
+
+    def read(self):
+        if not self.is_opened:
+            return False, None
+        try:
+            ok, frame = self._capture.read()
+        except Exception:
+            ok, frame = False, None
+        if ok and frame is not None:
+            self._read_failures = 0
+            return True, frame
+        self._read_failures += 1
+        if self._read_failures >= 3:
+            self._release_current()
+        return False, None
+
+    def close(self) -> None:
+        self._release_current()
+
+    def _release_current(self) -> None:
+        capture = self._capture
+        self._capture = None
+        self._read_failures = 0
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                pass
+
+    def _reject_candidate(self, candidate) -> tuple[bool, float]:
+        if candidate is not None:
+            try:
+                candidate.release()
+            except Exception:
+                pass
+        delay = self._retry_delay
+        self._retry_delay = min(max(delay * 2.0, 0.25), 3.0)
+        return False, delay
+
+    def _configure(self, capture) -> None:
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if self.args.camera_width is not None:
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.args.camera_width)
+        if self.args.camera_height is not None:
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.args.camera_height)
+        if self.args.camera_fps is not None:
+            capture.set(cv2.CAP_PROP_FPS, self.args.camera_fps)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run snapshot-based vision processors and publish topic envelopes.",
@@ -113,18 +217,8 @@ async def run(args: argparse.Namespace) -> None:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = args.opencv_ffmpeg_capture_options
 
     capture_source = normalize_camera_source_for_capture(args.camera_source)
-    capture = cv2.VideoCapture(capture_source, cv2.CAP_FFMPEG)
+    capture = RecoveringVideoCapture(capture_source, args)
     try:
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if args.camera_width is not None:
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.camera_width)
-        if args.camera_height is not None:
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.camera_height)
-        if args.camera_fps is not None:
-            capture.set(cv2.CAP_PROP_FPS, args.camera_fps)
-        if not capture.isOpened():
-            raise RuntimeError(f"camera stream not available: {args.camera_source}")
-
         room_light = None
         if "room_light" in set(args.processor):
             room_light = RoomLightSnapshotProcessor(
@@ -154,9 +248,24 @@ async def run(args: argparse.Namespace) -> None:
         next_sample_at = time.monotonic()
         async with broadcaster:
             print(f"vision snapshot processor listening on ws://{args.host}:{args.port}", flush=True)
-            print(f"camera source: {args.camera_source}", flush=True)
+            print(
+                f"camera source class: {camera_source_class(args.camera_source)}",
+                flush=True,
+            )
             print(f"processors: {', '.join(sorted(set(args.processor)))}", flush=True)
             while not stop_event.is_set():
+                if not capture.is_opened:
+                    opened, retry_delay = await asyncio.to_thread(capture.open_once)
+                    if not opened:
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(), timeout=retry_delay
+                            )
+                        except TimeoutError:
+                            pass
+                        continue
+                    if room_light is not None:
+                        room_light.reset()
                 delay = next_sample_at - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(min(delay, 0.1))
@@ -182,7 +291,7 @@ async def run(args: argparse.Namespace) -> None:
                             )
                         )
     finally:
-        capture.release()
+        capture.close()
 
 
 def main() -> int:
